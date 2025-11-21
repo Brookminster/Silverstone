@@ -1,0 +1,5 @@
+polars
+numpy
+matplotlib
+pillow
+imageio-ffmpeg
