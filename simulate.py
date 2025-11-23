@@ -268,7 +268,7 @@ def compute_dp_lane_plan(lane_paths, lane_list, speed_target, lane_change_penalt
     plan = np.zeros(M, dtype=int); plan[-1]=end
     for i in range(M-1,0,-1): plan[i-1]=pred[i,plan[i]]
     lane_plan = [lane_list[c] for c in plan]
-    return s_dense, lane_xy, lane_plan
+    return s_dense, lane_xy, lane_v, lane_plan
 
 
 def simulate_and_animate(
@@ -299,6 +299,8 @@ def simulate_and_animate(
     """
     # 1) Load lane data and detect available lane indices
     df = load_lanes(parquet_path)
+    df.describe()
+    df.head()
     cols = df.columns
     lane_indices = sorted([int(c.split('lane')[-1]) for c in cols if c.startswith('x_lane') and c.split('lane')[-1].isdigit()])
     if not lane_indices:
@@ -310,8 +312,10 @@ def simulate_and_animate(
 
     # 2) Compute a global lane plan using DP (a per-sample lane assignment)
     #    Pass tuning parameters into the planner so curvature-limited speeds
-    #    and lane-change penalty are respected.
-    s_dense, lane_xy_resampled, lane_plan = compute_dp_lane_plan(
+    #    and lane-change penalty are respected. The planner now returns
+    #    per-lane allowed speeds `lane_v` (resampled on the s-grid) which we
+    #    use below to enforce safety at runtime.
+    s_dense, lane_xy_resampled, lane_v_resampled, lane_plan = compute_dp_lane_plan(
         lane_paths, lane_indices, speed_target, lane_change_penalty=lane_change_penalty, a_lat_max=a_lat_max
     )
 
@@ -362,12 +366,31 @@ def simulate_and_animate(
     # 5) Setup plotting / animation helpers
     fig, ax = plt.subplots(figsize=(10,8))
     ax.set_aspect('equal', adjustable='datalim')
+    # Plot all lanes but keep Line2D references so we can highlight the
+    # currently selected lane during the animation.
+    lane_lines = {}
     for i in lane_indices:
-        lx,ly = lane_paths[i]; ax.plot(lx,ly,color='gray',linewidth=0.6)
+        lx,ly = lane_paths[i]
+        line_obj, = ax.plot(lx,ly,color='lightgray',linewidth=1.0, zorder=1, alpha=0.9)
+        lane_lines[i] = line_obj
 
+    # Main visualization artists
     line_car, = ax.plot([],[],'-k')
     car_poly=None; time_text=ax.text(0.02,0.95,'',transform=ax.transAxes)
+    speed_text = ax.text(0.02,0.90,'',transform=ax.transAxes)
     path_plot, = ax.plot(path_x, path_y, color='blue', linewidth=0.8, alpha=0.8)
+    # Highlighted local segment of the current lane (more visible)
+    main_lane_line, = ax.plot([], [], color='orange', linewidth=3, zorder=4, alpha=0.9)
+    # Highlight the DP-target lane nearby with a dashed green line
+    target_lane_line, = ax.plot([], [], color='lime', linewidth=3, linestyle='--', zorder=3, alpha=0.9)
+    # Small inset axes to show acceleration as a vertical bar (m/s^2)
+    accel_ax = fig.add_axes([0.82, 0.6, 0.12, 0.25])
+    accel_ax.set_xlim(-0.5, 0.5); accel_ax.set_ylim(-6.0, 6.0)
+    accel_ax.set_xticks([]); accel_ax.set_yticks([])
+    accel_bar_container = accel_ax.bar([0], [0], width=0.6, color='tab:blue')
+    accel_text = accel_ax.text(0, 0.85*6.0, '', ha='center', va='center')
+    # Acceleration vector artist (drawn from car); created/updated in update()
+    accel_arrow = None
     poly_x=[p[0] for p in poly_points]+[poly_points[0][0]]; poly_y=[p[1] for p in poly_points]+[poly_points[0][1]]
     ax.plot(poly_x, poly_y, color='black', linewidth=0.6, alpha=0.4)
 
@@ -381,9 +404,14 @@ def simulate_and_animate(
     stopped = False
 
     def init():
-        # Initialize axis limits and empty artists
+        # Initialize axis limits and empty artists. We set a wide default view;
+        # the update() function will center the view on the car.
         ax.set_xlim(min(poly_x)-20, max(poly_x)+20); ax.set_ylim(min(poly_y)-20, max(poly_y)+20)
-        line_car.set_data([],[]); time_text.set_text(''); return line_car, time_text
+        line_car.set_data([], []);
+        time_text.set_text(''); speed_text.set_text('')
+        main_lane_line.set_data([], []); target_lane_line.set_data([], [])
+        accel_bar_container.patches[0].set_height(0); accel_text.set_text('')
+        return line_car, time_text, speed_text, main_lane_line, target_lane_line, accel_bar_container.patches[0], accel_text
 
     ani_ref={'ani':None}
 
@@ -397,14 +425,84 @@ def simulate_and_animate(
         """
         nonlocal state, car_poly, chosen_lane, path_x, path_y, s, prev_delta, stopped
         t = frame*dt
-        # Longitudinal controller: proportional with acceleration/brake limits
-        raw_a = kp_speed * (speed_target - state[3])
-        a = max(-max_brake, min(max_accel, raw_a))
-
         # Determine current s-index using the DP base path (nearest vertex)
         idx_s = nearest_index_on_path(state[0], state[1], base_x, base_y)
         desired = lane_plan[idx_s]
-        if desired != chosen_lane:
+
+        # Adaptive lookahead (in meters): used by steering and for safety checks
+        lookahead = lookahead_base + lookahead_vel * state[3]
+        lookahead = max(min_lookahead, min(max_lookahead, lookahead))
+
+        # Longitudinal controller: compute a conservative local safe target
+        # speed based on the curvature-limited speeds computed by the DP and
+        # a braking-distance feasibility check. For every sample within the
+        # lookahead window we compute the maximum current speed that would
+        # still allow decelerating to the allowed speed at that future
+        # location using the maximum braking capability. We then take the
+        # minimum of these maxima as a safe upper bound for the present.
+        # This provides a simple, conservative safety envelope ensuring the
+        # vehicle can always brake in time for upcoming tight curves.
+        try:
+            v_allowed = float(lane_v_resampled[chosen_lane][idx_s])
+        except Exception:
+            v_allowed = speed_target
+
+        try:
+            v_allowed_desired = float(lane_v_resampled[desired][idx_s])
+        except Exception:
+            v_allowed_desired = v_allowed
+
+        # Discretization step along s (assume fairly uniform sampling)
+        ds_sample = max(1e-3, (s_dense[1] - s_dense[0])) if len(s_dense) > 1 else 1.0
+        lookahead_samples = max(1, int(math.ceil(lookahead / ds_sample)))
+        end_idx = min(len(s_dense)-1, idx_s + lookahead_samples)
+
+        # For each future sample compute the maximal present speed that allows
+        # braking to the allowed speed at that sample over distance d.
+        v_max_allowed_now = []
+        for k in range(idx_s, end_idx+1):
+            d = max(1e-6, s_dense[k] - s_dense[idx_s])
+            # consider both current lane and desired lane (conservative)
+            v_k_curr = float(lane_v_resampled[chosen_lane][k])
+            v_k_des = float(lane_v_resampled[desired][k]) if desired in lane_v_resampled else v_k_curr
+            v_k = min(v_k_curr, v_k_des)
+            # maximum initial speed `v0` such that with max_brake we can reach v_k
+            v0_allowed = math.sqrt(max(0.0, v_k**2 + 2.0 * max_brake * d))
+            v_max_allowed_now.append(v0_allowed)
+
+        # Safe maximum current speed considering lookahead; also enforce local curvature limit
+        v_safe_now = min(v_max_allowed_now) if v_max_allowed_now else v_allowed
+        target_speed_local = min(speed_target, v_allowed, v_safe_now)
+
+        # Compute raw acceleration toward the local speed target and clip
+        raw_a = kp_speed * (target_speed_local - state[3])
+        a = max(-max_brake, min(max_accel, raw_a))
+
+        # Predictive braking: if the allowed speed a bit further ahead is lower
+        # ensure we apply additional braking to follow the envelope smoothly.
+        # This is secondary because the `v_safe_now` clamp already enforces
+        # a conservative bound; here we softly increase braking if needed.
+        future_idx = min(len(s_dense)-1, idx_s + lookahead_samples)
+        try:
+            v_future_allowed = float(lane_v_resampled[chosen_lane][future_idx])
+        except Exception:
+            v_future_allowed = v_allowed
+
+        if state[3] > v_future_allowed + 0.1:
+            d = max(1e-3, s_dense[future_idx] - s_dense[idx_s])
+            decel_required = max(0.0, (state[3]**2 - v_future_allowed**2) / (2.0 * d))
+            decel_to_apply = min(decel_required, max_brake)
+            a = min(a, -decel_to_apply)
+        # Allow lane change only if the speed is safe for the desired lane; this
+        # prevents switching into a lane with tighter curvature when too fast.
+        desired_safe = False
+        try:
+            if state[3] <= lane_v_resampled[desired][idx_s] + 0.5:
+                desired_safe = True
+        except Exception:
+            desired_safe = True
+
+        if desired != chosen_lane and desired_safe:
             # Switch the controller's reference path to the newly chosen lane
             chosen_lane = desired; path_x, path_y = lane_xy_resampled[chosen_lane]
             s, x_of_s, y_of_s, heading_of_s = build_path_interp(path_x, path_y)
@@ -432,7 +530,52 @@ def simulate_and_animate(
         if car_poly is not None: car_poly.remove()
         pts = draw_car_polygon(state[0], state[1], state[2]); carpoly = ax.fill(pts[:,0], pts[:,1], color='red', zorder=5)
         car_poly = carpoly[0]
-        time_text.set_text(f"t={t:.1f}s v={state[3]:.1f} m/s lane={chosen_lane}")
+        time_text.set_text(f"t={t:.1f}s")
+        speed_text.set_text(f"v={state[3]:.1f} m/s  a={a:.2f} m/s²")
+
+        # Update accel bar (height = acceleration). Color positive accel blue, braking red
+        bar = accel_bar_container.patches[0]
+        bar.set_height(a)
+        bar.set_color('tab:blue' if a >= 0 else 'tab:red')
+        accel_text.set_text(f"{a:+.2f} m/s²")
+
+        # Update visible lane segments near the car to focus the view
+        # Determine a window (number of samples) around current index
+        try:
+            idxp = nearest_index_on_path(state[0], state[1], path_x, path_y)
+        except Exception:
+            idxp = 0
+        i0 = max(0, idxp-20); i1 = min(len(path_x), idxp+60)
+        main_lane_line.set_data(path_x[i0:i1], path_y[i0:i1])
+        # Highlight the whole current lane (other lanes remain light gray)
+        for li, lobj in lane_lines.items():
+            lobj.set_color('lightgray'); lobj.set_linewidth(1.0); lobj.set_alpha(0.6)
+        if chosen_lane in lane_lines:
+            lane_lines[chosen_lane].set_color('orange'); lane_lines[chosen_lane].set_linewidth(3.0); lane_lines[chosen_lane].set_alpha(0.95)
+        # Highlight the DP's desired lane segment
+        targ_x, targ_y = lane_xy_resampled[desired]
+        try:
+            j0 = max(0, nearest_index_on_path(state[0], state[1], targ_x, targ_y)-20)
+            j1 = min(len(targ_x), j0+80)
+            target_lane_line.set_data(targ_x[j0:j1], targ_y[j0:j1])
+        except Exception:
+            target_lane_line.set_data([], [])
+
+        # Draw acceleration vector from the car in the vehicle heading direction
+        nonlocal accel_arrow
+        # scale factor converts m/s^2 to meters in plot space for visibility
+        vec_scale = 0.8
+        ax_comp = a * vec_scale * math.cos(state[2])
+        ay_comp = a * vec_scale * math.sin(state[2])
+        if accel_arrow is not None:
+            try: accel_arrow.remove()
+            except Exception: pass
+        accel_arrow = ax.arrow(state[0], state[1], ax_comp, ay_comp, width=0.2, head_width=1.0, head_length=1.2, color=('tab:blue' if a>=0 else 'tab:red'), zorder=6, alpha=0.9)
+
+        # Center the axes on the car with a speed-dependent window
+        ww = max(15.0, 8.0 + state[3]*3.0)
+        ax.set_xlim(state[0]-ww, state[0]+ww)
+        ax.set_ylim(state[1]-ww*0.6, state[1]+ww*0.6)
 
         # If the vehicle leaves the track polygon (our crude containment test), stop once
         if not stopped and not track_poly.contains_point((state[0], state[1])):
@@ -446,7 +589,7 @@ def simulate_and_animate(
             print(f"Finished track at t={t:.2f}s. Stopping.")
             try: ani_ref['ani'].event_source.stop()
             except Exception: pass
-        return line_car, car_poly, time_text
+        return line_car, time_text, speed_text, main_lane_line, target_lane_line, bar, accel_text, accel_arrow
 
     ani = animation.FuncAnimation(fig, update, frames=sim_steps, init_func=init, interval=dt*1000, blit=False)
     ani_ref['ani']=ani
