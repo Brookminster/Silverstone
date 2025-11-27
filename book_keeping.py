@@ -1,5 +1,7 @@
 from pathlib import Path
 import polars as pl
+import os
+
 
 def make_folder_name(
     N_LANES,
@@ -71,6 +73,9 @@ def init_test_run_folder(
 
     # 2) create folder
     run_path = Path(base_dir) / folder_name
+    has_run = os.path.isdir(run_path)
+    if has_run:
+        return run_path, False
     run_path.mkdir(parents=True, exist_ok=True)
 
     # 3) create Setting frame (one row with all arguments)
@@ -91,13 +96,8 @@ def init_test_run_folder(
             "rho": [rho]
         }
     )
-
-    # 4) save settings into the folder
     Setting.write_parquet(run_path / "Setting.parquet")
-    # or CSV:
-    # Setting.write_csv(run_path / "Setting.csv")
-
-    return run_path, Setting
+    return run_path, True
 
 
 def save_frame_to_run_dir(

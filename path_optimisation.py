@@ -4,13 +4,16 @@ import os
 from pathlib import Path
 
 import Utils.constants
-from Utils.constants import FOLDER, DATA_FOLDER
+from Utils.constants import FOLDER, DATA_FOLDER, RUN_FOLDER
 from Utils.constants import N_LANES, N_SPEEDS, N_TIME_LIMIT, N_DIRECTIONS, N_SPEED_DEVIATION, N_LANE_DEVIATION, N_TIME_LIMIT
 from Utils.constants import MAX_COST_VALUE
 from Utils.state_navigation import l0_range, l1_range, d0_range, d1_range, s0_range, s1_range, index_to_speed
 from Utils.state_navigation import action_range, distance_pairs, get_next_lane, get_previous_lane, lanes_speed_range,lanes_dir_range
 from Utils.state_navigation import get_index_from_policy_tuple, get_policy_tuple_from_index, get_index_from_ls_double,get_index_from_ld_double
+import Utils.data_generation as data_gen
+
 import Utils.visualisation as vis
+import Utils.book_keeping as bk
 
 def add_Force_requiremments( M, g, tau_h, tau_v, mu, F_MAX_ACC):
     s_max = index_to_speed(N_SPEEDS-1)
@@ -19,7 +22,6 @@ def add_Force_requiremments( M, g, tau_h, tau_v, mu, F_MAX_ACC):
     max_speed = index_to_speed(max(s0_range()))
     force = tau_h*max_speed*max_speed + M*max_acc
     print("Force required for max speed", force)
-
 
 #const_columns_names = [f"const_l{l0}s{s0}d{d0}_l{l1}s{s1}d{d1}" for (l0,s0,d0,l1,s1,d1) in action_range]
 def add_Forces_and_constraints(opt_ldf:pl.LazyFrame, M, g, tau_h, tau_v, mu, F_MAX_ACC, F_X_NEG_SCALE, F_X_MAX_SCALE, F_Y_MAX_SCALE):
@@ -75,7 +77,8 @@ def backward_optimiser(costs_arr):
     next_state = np.tile(np.arange(S), (S, 1))
 
     # terminal time
-    V[-1] = np.min(costs[-1], axis=1)        # min over actions
+    #V[-1] = np.min(costs[-1], axis=1)        # min over actions
+    V[-1] = np.zeros(S)
     policy[-1] = np.argmin(costs[-1], axis=1)
     #print("Start optimisation at time stamp", T-1)
 
@@ -127,7 +130,8 @@ def backward_optimiser_with_uncertainty(costs_arr,theta):
     # uncertainty matrix: P(executed=j | intended=i)
     A = uncertainty_matrix(theta)
     # terminal time
-    V[-1] = np.min(costs[-1], axis=1)        # min over actions
+    #V[-1] = np.min(costs[-1], axis=1)        # min over actions
+    V[-1] = np.zeros(S)
     policy[-1] = np.argmin(costs[-1], axis=1)
     print("Start optimisation at time stamp", T-1)
 
@@ -225,9 +229,9 @@ def add_track_data_to_optimal_trajectory(optimal_trajectory, opt_data):
         opt_data.select(cols_to_add)
     )
     return aot_df
-    
-def add_Forces_data_to_optimal_trajectory(traj_df, acc, av, M, g, tau_h, tau_v, mu, F_MAX_ACC):
-    print(f"M:{M} g:{g} tau_h:{tau_h} tau_v:{tau_v} mu:{mu} F_MAX_ACC:{F_MAX_ACC}")
+
+def add_Forces_data_to_optimal_trajectory(traj_df, acc, av, M, g, tau_h, tau_v, mu, F_MAX_ACC, F_X_NEG_SCALE, F_X_MAX_SCALE, F_Y_MAX_SCALE):
+    #print(f"M:{M} g:{g} tau_h:{tau_h} tau_v:{tau_v} mu:{mu} F_MAX_ACC:{F_MAX_ACC}")
 
     def get_acc(t,l0,s0,l1,s1):
         index0 = int(get_index_from_ls_double(l0,s0))
@@ -242,18 +246,18 @@ def add_Forces_data_to_optimal_trajectory(traj_df, acc, av, M, g, tau_h, tau_v, 
     def F_acc(t,l0,s0,l1,s1):
         a = get_acc(t,l0,s0,l1,s1)
         speed = index_to_speed(s0)
-        F = M*(a if a > 0 else -0.5*a) + tau_h*speed*speed
+        F = M*(a if a > 0 else -F_X_NEG_SCALE*a) + tau_h*speed*speed
         return F
     
     def F_x(t,l0,s0,l1,s1):
         a = get_acc(t,l0,s0,l1,s1)
-        F = M*abs(a)
+        F = F_X_MAX_SCALE*M*abs(a)
         return F
     
     def F_y(t,l0,s0,d0,l1,s1,d1):
         ka = get_ka(t,l0,d0,l1,d1)
         speed = index_to_speed(s0)
-        F = M*ka*speed*speed
+        F = F_Y_MAX_SCALE*M*ka*speed*speed
         return F
     
     def F_z(t,s0):
@@ -294,12 +298,12 @@ def make_cost_df(opt_df,MASS, g, tau_h, tau_v, mu, F_MAX_ACC, F_X_NEG_SCALE, F_X
     costs_df = costs_ldf.collect()
     return costs_df
 
-import book_keeping as bk
 
 def run_opt(costs_df, acc_arr, av_arr, MASS, g, tau_h, tau_v, mu, F_MAX_ACC, F_X_NEG_SCALE, F_X_MAX_SCALE, F_Y_MAX_SCALE, rho):
+    run_path, needs_to_run = bk.init_test_run_folder(RUN_FOLDER,N_LANES,N_SPEEDS,N_DIRECTIONS,MASS,g,tau_h,tau_v,mu,F_MAX_ACC,F_X_NEG_SCALE,F_X_MAX_SCALE,F_Y_MAX_SCALE,rho)
     print(f"PARAMETERS: M:{MASS} g:{g} tau_h:{tau_h} tau_v:{tau_v} mu:{mu} F_MAX_ACC:{F_MAX_ACC} F_X_NEG_SCALE:{F_X_NEG_SCALE} F_X_MAX_SCALE:{F_X_MAX_SCALE} F_Y_MAX_SCALE:{F_Y_MAX_SCALE} rho:{rho} ")
     print("***** making cost_arr *****")
-    costs,_ = bk.np_action_range_frames_for_name(costs_df,"cost",save=False)
+    costs,_ = data_gen.np_action_range_frames_for_name(costs_df,"cost",save=False)
     print(f"***** optimal policy with uncertainty {rho} *****")
     if rho == 0.0:
         policy,V = backward_optimiser(costs)
@@ -310,17 +314,16 @@ def run_opt(costs_df, acc_arr, av_arr, MASS, g, tau_h, tau_v, mu, F_MAX_ACC, F_X
     print("***** augmenting trajectory with track data *****")
     traj_df = add_track_data_to_optimal_trajectory(optimal_trajectory_df,costs_df)
     print("***** adding force terms to trajectory *****")
-    atraj_df = add_Forces_data_to_optimal_trajectory(traj_df, acc_arr, av_arr, MASS, g, tau_h, tau_v, mu, F_MAX_ACC)
+    atraj_df = add_Forces_data_to_optimal_trajectory(traj_df, acc_arr, av_arr, MASS, g, tau_h, tau_v, mu, F_MAX_ACC, F_X_NEG_SCALE, F_X_MAX_SCALE, F_Y_MAX_SCALE)
     print("*****making plots *****")
     #path_opt.make_diagnostic_plots(atraj_df)
-    run_path, setting = bk.init_test_run_folder(FOLDER,N_LANES,N_SPEEDS,N_DIRECTIONS,MASS,g,tau_h,tau_v,mu,F_MAX_ACC,F_X_NEG_SCALE,F_X_MAX_SCALE,F_Y_MAX_SCALE,rho)
     bk.save_frame_to_run_dir(atraj_df, run_path, "trajectory")
     print("***** making plots *****")
-    make_diagnostic_plots(atraj_df, False, str(run_path))
+    make_diagnostic_plots(atraj_df, True, str(run_path))
     print("***** make result frame *****")
     results_frame = print_opt_result(atraj_df)
     bk.save_frame_to_run_dir(results_frame, run_path, "results")
-
+    return costs, atraj_df
 def print_opt_result(df):
     tot_cost = max(df["tot_cost"])
     tot_cost_robust = sum(list(df["times_est"]))
@@ -331,6 +334,7 @@ def print_opt_result(df):
         "tot_cost_robust":tot_cost_robust,
         "max_speed":max_speed
     })
+    print("")
     return result_df
 
 

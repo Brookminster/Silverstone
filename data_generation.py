@@ -21,7 +21,7 @@ def track_data_import():
     return df.head(N_TIME_LIMIT) 
 
 def lane_creation(ldf:pl.LazyFrame):
-    print("***** Importing Track Data *****")
+    lane_factors = [-0.5 + i / (N_LANES - 1) for i in range(N_LANES)] if N_LANES > 1 else [ 0.0 ]
     #Create and add the lanes
     aldf = ldf.with_columns([
         (pl.col("x_m").shift(-1).fill_null(strategy="forward") - pl.col("x_m").shift(1).fill_null(strategy="backward")).alias("x_dir"),
@@ -32,26 +32,40 @@ def lane_creation(ldf:pl.LazyFrame):
     ]).with_columns([
         (pl.col("x_dir")/pl.col("norm_dir")).alias("x_udir"),
         (pl.col("y_dir")/pl.col("norm_dir")).alias("y_udir")
-    ])
-
-    lane_factors = [-0.5 + i / (N_LANES - 1) for i in range(N_LANES)] if N_LANES > 1 else [ 0.0 ]
-    #print(lane_factors)
-    aldf = aldf.with_columns(
+    ]).with_columns(
             [(pl.col("x_m") - pl.lit(f) * pl.col("width") * pl.col("y_udir")).alias(f"x_lane{i}") for i, f in enumerate(lane_factors)] +
             [(pl.col("y_m") + pl.lit(f) * pl.col("width") * pl.col("x_udir")).alias(f"y_lane{i}") for i, f in enumerate(lane_factors)]
         )
+    # def get_curvature():
+    #     x_m0 = pl.col("x_m").shift(-1).fill_null(strategy="forward")
+    #     x_m1 = pl.col("x_m")
+    #     x_m2 = pl.col("x_m").shift(1).fill_null(strategy="backward")
+    #     y_m0 = pl.col("y_m").shift(-1).fill_null(strategy="forward")
+    #     y_m1 = pl.col("y_m")
+    #     y_m2 = pl.col("y_m").shift(1).fill_null(strategy="backward")
+    #     d0 = (x_m1 - x_m0).pow(2) + (y_m1 - y_m0).pow(2)
+    #     d1 = (x_m2 - x_m1).pow(2) + (y_m2 - y_m1).pow(2)
+    #     snd_diff = (x_m0 - 2*x_m1 + x_m2).pow(2) + (y_m0 - 2*y_m1 + y_m2).pow(2)
+    #     prod = d0*d1
+    #     return pl.when(prod != 0.0).then((snd_diff/prod).sqrt()).otherwise(pl.lit(0.0)).alias(f"kappa_mid")
     def get_curvature():
-        x_m0 = pl.col("x_m").shift(-1).fill_null(strategy="forward")
-        x_m1 = pl.col("x_m")
-        x_m2 = pl.col("x_m").shift(1).fill_null(strategy="backward")
-        y_m0 = pl.col("y_m").shift(-1).fill_null(strategy="forward")
-        y_m1 = pl.col("y_m")
-        y_m2 = pl.col("y_m").shift(1).fill_null(strategy="backward")
-        d0 = (x_m1 - x_m0).pow(2) + (y_m1 - y_m0).pow(2)
-        d1 = (x_m2 - x_m1).pow(2) + (y_m2 - y_m1).pow(2)
-        snd_diff = (x_m0 - 2*x_m1 + x_m2).pow(2) + (y_m0 - 2*y_m1 + y_m2).pow(2)
-        prod = d0*d1
-        return pl.when(prod != 0.0).then((snd_diff/prod).sqrt()).otherwise(pl.lit(0.0)).alias(f"kappa_mid")
+        x0 = pl.col("x_m").shift(-1)
+        x1 = pl.col("x_m")
+        x2 = pl.col("x_m").shift(1)
+        y0 = pl.col("y_m").shift(-1)
+        y1 = pl.col("y_m")
+        y2 = pl.col("y_m").shift(1)
+        eps=1e-12
+        a = ((x1 - x2)**2 + (y1 - y2)**2).sqrt()
+        b = ((x0 - x2)**2 + (y0 - y2)**2).sqrt()
+        c = ((x0 - x1)**2 + (y0 - y1)**2).sqrt()
+        # signed twice-area via cross product
+        area2 = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+        A = area2.abs() * 0.5
+        den = a * b * c
+        num = 4.0 * A
+        kappa = pl.when(den > eps).then(num / den).otherwise(pl.lit(0.0)).fill_null(0.0)
+        return kappa.alias(f"kappa_mid")
     aldf = aldf.with_columns(get_curvature())
     return aldf
 
@@ -80,33 +94,22 @@ def save_frame(df:pl.LazyFrame,name):
     return path 
 
 
-
 #distance between lanes in subsequent time steps
 def make_lane_distance_columns(l0,l1):
     x_col0 = pl.col("x_lane"+str(l0))
-    x_col1 = pl.col("x_lane"+str(l1)).shift(-1).fill_null(strategy="forward")
+    x_col1 = pl.col("x_lane"+str(l1)).shift(-1)
     y_col0 = pl.col("y_lane"+str(l0))
-    y_col1 = pl.col("y_lane"+str(l1)).shift(-1).fill_null(strategy="forward")
+    y_col1 = pl.col("y_lane"+str(l1)).shift(-1)
     dist = ((x_col1-x_col0).pow(2) + (y_col1-y_col0).pow(2)).sqrt()
     return dist.alias(f"d_l{l0}_l{l1}")
 lane_distance_columns = [make_lane_distance_columns(l0,l1) for (l0,l1) in distance_pairs]
 lane_distance_columns_names = [f"d_l{l0}_l{l1}" for (l0,l1) in distance_pairs]
 
-# #average speed
-# def make_average_speed(s0,s1):
-#     avspeed = 0.5*(index_to_speed(s0) + index_to_speed(s1))
-#     avs = pl.lit(avspeed)
-#     return avs.alias(f"as_s{s0}_s{s1}")
-# average_speeds_columns = [make_average_speed(s0,s1) for s0 in s0_range() for s1 in s1_range(s0)]
-# average_speeds_columns_names = [f"as_s{s0}_s{s1}" for (s0,s1) in speeds_range]
-
 #time cost
 def make_time_costs(l0,l1,s0,s1):
     av_speed = 0.5*(index_to_speed(s0) + index_to_speed(s1))
     d01_col = pl.col(f"d_l{l0}_l{l1}")
-    ratio = pl.when(av_speed > 0).then(d01_col/av_speed).otherwise(MAX_COST_VALUE)
-    eps=1e-12
-    tc = pl.when(d01_col < eps).then(pl.lit(0.0)).otherwise(ratio)
+    tc = d01_col/pl.lit(av_speed) 
     return tc.alias(f"tc_l{l0}s{s0}_l{l1}s{s1}")
 time_costs_columns = [make_time_costs(l0,l1,s0,s1) for (l0,s0,l1,s1) in lanes_speed_range]
 time_costs_columns_names = [f"tc_l{l0}s{s0}_l{l1}s{s1}" for (l0,s0,l1,s1) in lanes_speed_range]
@@ -115,43 +118,42 @@ time_costs_columns_names = [f"tc_l{l0}s{s0}_l{l1}s{s1}" for (l0,s0,l1,s1) in lan
 def make_acceleration(l0,s0,l1,s1):
     speed_delta = index_to_speed(s1) - index_to_speed(s0)
     time_cost = pl.col(f"tc_l{l0}s{s0}_l{l1}s{s1}")
-    ratio = pl.when(time_cost > 0).then(pl.lit(speed_delta)/time_cost).otherwise(MAX_COST_VALUE)
     eps=1e-12
-    acc = pl.when(speed_delta < eps).then(pl.lit(0.0)).otherwise(ratio)
+    acc = pl.when(time_cost == eps).then(0.0).otherwise(pl.lit(speed_delta)/time_cost)
     return acc.alias(f"acc_l{l0}s{s0}_l{l1}s{s1}")
 acceleration_columns = [make_acceleration(l0,s0,l1,s1) for (l0,s0,l1,s1) in lanes_speed_range]
 acceleration_columns_names = [f"acc_l{l0}s{s0}_l{l1}s{s1}" for (l0,s0,l1,s1) in lanes_speed_range]
 
-#inner product to get a sense of curvature
-def make_ip(l0,d0,l1,d1):
-    ln = l1
-    lp = get_previous_lane(l0,d0)
-    x_m0 = pl.col("x_lane"+str(lp)).shift(-1).fill_null(strategy="forward")
-    x_m1 = pl.col("x_lane"+str(l0))
-    x_m2 = pl.col("x_lane"+str(ln)).shift(1).fill_null(strategy="backward")
-    y_m0 = pl.col("y_lane"+str(lp)).shift(-1).fill_null(strategy="forward")
-    y_m1 = pl.col("y_lane"+str(l1))
-    y_m2 = pl.col("y_lane"+str(ln)).shift(1).fill_null(strategy="backward")
-    iprod = (x_m1 - x_m0)*(x_m2 - x_m1) + (y_m1 - y_m0)*(y_m2 - y_m1)
-    di0 = (x_m1 - x_m0).pow(2) + (y_m1 - y_m0).pow(2)
-    di1 = (x_m2 - x_m1).pow(2) + (y_m2 - y_m1).pow(2)
-    prod = di0*di1
-    kappa = pl.when((iprod != 0.0) & (x_m0 != x_m1) & (x_m1 != x_m2)).then((iprod/(prod.sqrt()))).otherwise(pl.lit(1.0))
-    av = kappa
-    return av.alias(f"ip_l{l0}d{d0}_l{l1}d{d1}")
-ip_columns = [make_ip(l0,d0,l1,d1) for (l0,d0,l1,d1) in lanes_dir_range]
-ip_columns_names = [f"ip_l{l0}d{d0}_l{l1}d{d1}" for (l0,d0,l1,d1) in lanes_dir_range]
+# #inner product to get a sense of curvature
+# def make_ip(l0,d0,l1,d1):
+#     ln = l1
+#     lp = get_previous_lane(l0,d0)
+#     x_m0 = pl.col("x_lane"+str(lp)).shift(-1).fill_null(strategy="forward")
+#     x_m1 = pl.col("x_lane"+str(l0))
+#     x_m2 = pl.col("x_lane"+str(ln)).shift(1).fill_null(strategy="backward")
+#     y_m0 = pl.col("y_lane"+str(lp)).shift(-1).fill_null(strategy="forward")
+#     y_m1 = pl.col("y_lane"+str(l1))
+#     y_m2 = pl.col("y_lane"+str(ln)).shift(1).fill_null(strategy="backward")
+#     iprod = (x_m1 - x_m0)*(x_m2 - x_m1) + (y_m1 - y_m0)*(y_m2 - y_m1)
+#     di0 = (x_m1 - x_m0).pow(2) + (y_m1 - y_m0).pow(2)
+#     di1 = (x_m2 - x_m1).pow(2) + (y_m2 - y_m1).pow(2)
+#     prod = di0*di1
+#     kappa = pl.when((iprod != 0.0) & (x_m0 != x_m1) & (x_m1 != x_m2)).then((iprod/(prod.sqrt()))).otherwise(pl.lit(1.0))
+#     av = kappa
+#     return av.alias(f"ip_l{l0}d{d0}_l{l1}d{d1}")
+# ip_columns = [make_ip(l0,d0,l1,d1) for (l0,d0,l1,d1) in lanes_dir_range]
+# ip_columns_names = [f"ip_l{l0}d{d0}_l{l1}d{d1}" for (l0,d0,l1,d1) in lanes_dir_range]
 
 #angular velocity
 def make_kappa(l0,d0,l1,d1):
     ln = l1
     lp = get_previous_lane(l0,d0)
-    x0 = pl.col("x_lane"+str(lp)).shift(-1).fill_null(strategy="forward")
+    x0 = pl.col("x_lane"+str(lp)).shift(-1)
     x1 = pl.col("x_lane"+str(l0))
-    x2 = pl.col("x_lane"+str(ln)).shift(1).fill_null(strategy="backward")
-    y0 = pl.col("y_lane"+str(lp)).shift(-1).fill_null(strategy="forward")
+    x2 = pl.col("x_lane"+str(ln)).shift(1)
+    y0 = pl.col("y_lane"+str(lp)).shift(-1)
     y1 = pl.col("y_lane"+str(l1))
-    y2 = pl.col("y_lane"+str(ln)).shift(1).fill_null(strategy="backward")
+    y2 = pl.col("y_lane"+str(ln)).shift(1)
     eps=1e-12
     a = ((x1 - x2)**2 + (y1 - y2)**2).sqrt()
     b = ((x0 - x2)**2 + (y0 - y2)**2).sqrt()
@@ -169,7 +171,7 @@ kappa_columns_names = [f"ka_l{l0}d{d0}_l{l1}d{d1}" for (l0,d0,l1,d1) in lanes_di
 def augment_frame_for_optimisation(lanes_ldf:pl.LazyFrame):
     opt_ldf = lanes_ldf.with_columns(
         lane_distance_columns).with_columns(
-             time_costs_columns).with_columns(acceleration_columns + kappa_columns)
+             time_costs_columns).with_columns(acceleration_columns + kappa_columns).fill_null(0.0)
 
     return opt_ldf 
 
@@ -262,48 +264,6 @@ def np_speeds_range_frames_for_name(df:pl.LazyFrame, name, save=True):
         np.save(path, arr)
     return arr, path
 
-
-# def make_numpy_frames_for_optimiser(opt_df:pl.DataFrame):
-#     #Tools to navigate the cost array
-#     N_TIME = len(opt_df)
-#     def make_cost_array(): return np.full((N_LANES*N_SPEEDS*N_DIRECTIONS,N_LANES*N_SPEEDS*N_DIRECTIONS,N_TIME), MAX_COST_VALUE)
-#     tc_arr = make_cost_array()
-#     acc_arr = make_cost_array()
-#     as_arr = make_cost_array()
-
-#     def state_cost_tuple_to_index(l0,s0,d0):
-#         index = l0*N_SPEEDS*N_DIRECTIONS + s0*N_DIRECTIONS + d0 
-#         return index
-
-#     for (l0,s0,d0,l1,s1,d1) in action_range:
-#         index0 = state_cost_tuple_to_index(l0,s0,d0) 
-#         index1 = state_cost_tuple_to_index(l1,s1,d1)
-#         tc_arr[index0][index1] = opt_df[f"tc_l{l0}s{s0}_l{l1}s{s1}"].to_numpy()
-#         acc_arr[index0][index1] = opt_df[f"acc_l{l0}s{s0}d{d0}_l{l1}s{s1}d{d1}"].to_numpy()
-#         as_arr[index0][index1] = opt_df[f"as_s{s0}_s{s1}"].to_numpy()
-    
-#     #makes time the first index
-#     tc_arr = tc_arr.transpose(2,0,1)
-#     as_arr = as_arr.transpose(2,0,1)
-#     acc_arr = acc_arr.transpose(2,0,1)
-    
-#     tc_path = Path(FOLDER + f"\\tc_{N_LANES}") 
-#     as_path = Path(FOLDER + f"\\as_{N_LANES}") 
-#     acc_path = Path(FOLDER + f"\\acc_{N_LANES}")
-#     np.save(tc_path, tc_arr)
-#     np.save(as_path, as_arr)
-#     np.save(acc_path, acc_arr)
-
-#     return tc_path, as_path, acc_path
-
-#Help pring the matrix in the optimisaton 
-# def print_state(V):
-#     for s0 in range(N_SPEEDS):
-#         for d0 in range(N_DIRECTIONS):
-#             val = [V[get_index_from_policy_tuple(l0,s0,d0)] for l0 in range(N_LANES)]
-#             s = " ".join(f"{x:.5e}" for x in np.ravel(val))
-#             print(f"s={s0} d={d0}: " + s)
-
 def data_generation(name):
     print("***** Importing Track Data *****")
     track_df = track_data_import()
@@ -311,8 +271,8 @@ def data_generation(name):
     print("***** Creating Lanes *****")
     track_lanes_ldf = lane_creation(track_ldf)
 
-    path = Path(FOLDER + r"\\TrackPlot.html")
-    Utils.visualisation.make_just_track_plot(track_lanes_ldf.collect(),path)
+    # path = Path(FOLDER + r"\\TrackPlot.html")
+    # Utils.visualisation.make_just_track_plot(track_lanes_ldf.collect(),path)
 
     print("***** Thinging track *****")
     filtered_track_lanes_df = track_thinning(track_lanes_ldf)
