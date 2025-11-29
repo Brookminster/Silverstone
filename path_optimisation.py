@@ -5,7 +5,7 @@ from pathlib import Path
 
 import Utils.constants
 from Utils.constants import FOLDER, DATA_FOLDER, RUN_FOLDER
-from Utils.constants import N_LANES, N_SPEEDS, N_TIME_LIMIT, N_DIRECTIONS, N_SPEED_DEVIATION, N_LANE_DEVIATION, N_TIME_LIMIT
+from Utils.constants import N_LANES, N_SPEEDS, N_TIME_LIMIT, N_DIRECTIONS,  N_LANE_DEVIATION, N_TIME_LIMIT
 from Utils.constants import MAX_COST_VALUE
 from Utils.state_navigation import l0_range, l1_range, d0_range, d1_range, s0_range, s1_range, index_to_speed
 from Utils.state_navigation import action_range, distance_pairs, get_next_lane, get_previous_lane, lanes_speed_range,lanes_dir_range
@@ -45,7 +45,7 @@ def add_Forces_and_constraints(opt_ldf:pl.LazyFrame, M, g, tau_h, tau_v, mu, F_M
         speed2 = speed*speed
         a_asym = (pl.when(a>0).then(a).otherwise(F_x_neg_scale_lit*a)).abs()
         F_acc = M_lit*a_asym + tau_h_lit*speed2
-        F_x = M_lit*abs(a)*F_x_scale_lit 
+        F_x = M_lit*abs(a_asym)*F_x_scale_lit #could make this a
         F_y = M_lit*kappa*speed2*F_y_scale_lit
         F_z = pl.lit(mu)*(Mg_lit + tau_v_lit*speed2)
         F_t = (F_x*F_x + F_y*F_y) - (F_z*F_z)
@@ -94,6 +94,31 @@ def backward_optimiser(costs_arr):
         V[t] = np.min(q, axis=1)
     return policy,V
 
+# def uncertainty_matrix(theta):
+#     N = N_LANES*N_SPEEDS*N_DIRECTIONS
+#     A = np.full((N,N), 0.0)
+#     for index in range(N):
+#         A[index,index] = 1.0  
+#     for l0 in l0_range():
+#         for s0 in s0_range():
+#             for d0 in d0_range(l0):
+#                 j = get_index_from_policy_tuple(l0,s0,d0)
+#                 a0 = a1 = a2 = a3 = a4 = 0.0
+#                 if j-2 >= 0 and j-2 < N: a0 = theta*theta/16.0
+#                 if j-1 >= 0 and j-1 < N: a1 = theta*theta/4.0
+#                 if j >= 0 and j < N:     a2 = 1.0-5.0*theta*theta/8.0
+#                 if j+1 >= 0 and j+1 < N: a3 = theta*theta/4.0
+#                 if j+2 >= 0 and j+2 < N: a4 = theta*theta/16.0
+#                 at = a0 + a1 + a2 + a3 + a4
+#                 ##Fill out weights
+#                 if j-2 >= 0 and j-2 < N:    A[j-2,j] = a0/at  
+#                 if j-1 >= 0 and j-1 < N:    A[j-1,j] = a1/at
+#                 if j >= 0 and j < N:        A[j,j] = a2/at
+#                 if j+1 >= 0 and j+1 < N:    A[j+1,j] = a3/at  
+#                 if j+2 >= 0 and j+2 < N:    A[j+2,j] = a4/at  
+#     return A
+
+# At any time we might go -2 to +2 faster
 def uncertainty_matrix(theta):
     N = N_LANES*N_SPEEDS*N_DIRECTIONS
     A = np.full((N,N), 0.0)
@@ -104,19 +129,115 @@ def uncertainty_matrix(theta):
             for d0 in d0_range(l0):
                 j = get_index_from_policy_tuple(l0,s0,d0)
                 a0 = a1 = a2 = a3 = a4 = 0.0
-                if j-2 >= 0 and j-2 < N: a0 = theta*theta/16.0
-                if j-1 >= 0 and j-1 < N: a1 = theta*theta/4.0
-                if j >= 0 and j < N:     a2 = 1.0-5.0*theta*theta/8.0
-                if j+1 >= 0 and j+1 < N: a3 = theta*theta/4.0
-                if j+2 >= 0 and j+2 < N: a4 = theta*theta/16.0
+                if s0-2 >= 0:       a0 = theta*theta/16.0
+                if s0-1 >= 0:       a1 = theta*theta/4.0
+                if s0   >= 0:       a2 = 1.0-5.0*theta*theta/8.0
+                if s0+1 < N_SPEEDS: a3 = theta*theta/4.0
+                if s0+2 < N_SPEEDS: a4 = theta*theta/16.0
                 at = a0 + a1 + a2 + a3 + a4
-                ##Fill out weights
-                if j-2 >= 0 and j-2 < N:    A[j-2,j] = a0/at  
-                if j-1 >= 0 and j-1 < N:    A[j-1,j] = a1/at
-                if j >= 0 and j < N:        A[j,j] = a2/at
-                if j+1 >= 0 and j+1 < N:    A[j+1,j] = a3/at  
-                if j+2 >= 0 and j+2 < N:    A[j+2,j] = a4/at  
+                if s0-2 >= 0:
+                    i = get_index_from_policy_tuple(l0,s0-2,d0)
+                    A[i,j] = a0/at 
+                if s0-1 >= 0:
+                    i = get_index_from_policy_tuple(l0,s0-1,d0)
+                    A[i,j] = a1/at
+                if s0 >= 0:
+                    i = get_index_from_policy_tuple(l0,s0,d0)
+                    A[i,j] = a2/at
+                if s0+1 < N_SPEEDS:
+                    i = get_index_from_policy_tuple(l0,s0+1,d0)
+                    A[i,j] = a3/at
+                if s0+2 < N_SPEEDS:
+                    i = get_index_from_policy_tuple(l0,s0+2,d0)
+                    A[i,j] = a4/at
     return A
+
+#This matrix is about casting doubt on breaking. 
+def uncertainty_matrix(theta):
+    N = N_LANES*N_SPEEDS*N_DIRECTIONS
+    A = np.full((N,N), 0.0)
+    for index in range(N):
+        A[index,index] = 1.0  
+    for l0 in l0_range():
+        for s0 in s0_range():
+            for d0 in d0_range(l0):
+                j = get_index_from_policy_tuple(l0,s0,d0)
+                a0 = a1 = a2 = 0.0
+                if s0-2 >= 0:       a0 = theta*theta/16.0*2.0
+                if s0-1 >= 0:       a1 = theta*theta/4.0*2.0
+                if s0   >= 0:       a2 = 1.0-5.0*theta*theta/8.0*4.0
+                at = a0 + a1 + a2
+                if s0-2 >= 0:
+                    i = get_index_from_policy_tuple(l0,s0-2,d0)
+                    A[i,j] = a0/at 
+                if s0-1 >= 0:
+                    i = get_index_from_policy_tuple(l0,s0-1,d0)
+                    A[i,j] = a1/at
+                if s0 >= 0:
+                    i = get_index_from_policy_tuple(l0,s0,d0)
+                    A[i,j] = a2/at
+    return A
+
+# matrix that puts doubt on accelation
+#we go from j -> i
+def make_braking_uncertainty_matrix(theta,c):
+    new_c = c.copy()
+    for (l0,s0,d0,l1,s1,d1) in action_range:
+        if s1 < s0:
+            if s0 - 1 == s1:
+                i = get_index_from_policy_tuple(l0,s0,d0)
+                j = get_index_from_policy_tuple(l1,s1,d1)
+                j1 = get_index_from_policy_tuple(l1,s1+1,d1)
+                a1 = theta*theta/2.0
+                a = 1.0-a1
+                new_c[i,j] = a*c[i,j] + a1*c[i,j1]
+            if s0 - 2 == s1:
+                i = get_index_from_policy_tuple(l0,s0,d0)
+                j = get_index_from_policy_tuple(l1,s1,d1)
+                j1 = get_index_from_policy_tuple(l1,s1+1,d1)
+                j2 = get_index_from_policy_tuple(l1,s1+2,d1)
+                a2 = theta*theta/4.0
+                a1 = theta*theta/2.0
+                a = 1.0-a1-a2
+                new_c[i,j] = a*c[i,j] + a1*c[i,j1] + a2*c[i,j2]
+            if s0 - 3 == s1:
+                i = get_index_from_policy_tuple(l0,s0,d0)
+                j = get_index_from_policy_tuple(l1,s1,d1)
+                j1 = get_index_from_policy_tuple(l1,s1+1,d1)
+                j2 = get_index_from_policy_tuple(l1,s1+2,d1)
+                j3 = get_index_from_policy_tuple(l1,s1+3,d1)
+                # a3 = theta*theta/64.0*2.0
+                # a2 = theta*theta/16.0*2.0
+                # a1 = theta*theta/4.0*2.0
+                a3 = theta*theta/8.0
+                a2 = theta*theta/4.0
+                a1 = theta*theta/2.0
+                a = 1.0 - a1- a2 - a3
+                new_c[i,j] = a*c[i,j] + a1*c[i,j1] + a2*c[i,j2] + a3*c[i,j3]
+            if s0 - 4 == s1:
+                i = get_index_from_policy_tuple(l0,s0,d0)
+                j = get_index_from_policy_tuple(l1,s1,d1)
+                j1 = get_index_from_policy_tuple(l1,s1+1,d1)
+                j2 = get_index_from_policy_tuple(l1,s1+2,d1)
+                j3 = get_index_from_policy_tuple(l1,s1+3,d1)
+                j4 = get_index_from_policy_tuple(l1,s1+4,d1)
+                # a1 = 0.24 - 0.24*(theta-1)**2
+                # a2 = 0.054 +0.16*(theta-1) - 0.054*(theta-1)**2
+                # a3 = 0.0044 + 0.035*(theta-1) + 0.084*(theta-1)**2
+                # a4 = 0.00013 + 0.0020*(theta-1) + 0.012*(theta-1)**2
+                # a4 = theta*theta/128.0*2.0
+                # a3 = theta*theta/64.0*2.0
+                # a2 = theta*theta/16.0*2.0
+                # a1 = theta*theta/4.0*2.0
+                a4 = theta*theta/16.0
+                a3 = theta*theta/8.0
+                a2 = theta*theta/4.0
+                a1 = theta*theta/2.0
+                a = 1.0 - a1 - a2 - a3 - a4
+                new_c[i,j] = a*c[i,j] + a1*c[i,j1] + a2*c[i,j2] + a3*c[i,j3] + a4*c[i,j4]
+                
+    return new_c
+
 
 def backward_optimiser_with_uncertainty(costs_arr,theta):
     costs = costs_arr
@@ -125,10 +246,11 @@ def backward_optimiser_with_uncertainty(costs_arr,theta):
     #print("Sizes: ",T,S,A)
     V = np.zeros((T, S))
     policy = np.zeros((T, S), dtype=int)
-    next_state = np.tile(np.arange(S), (S, 1))
+    next_state = np.tile(np.arange(S), (S, 1)) #square matrix where each row is [0,..,S-1].
 
     # uncertainty matrix: P(executed=j | intended=i)
-    A = uncertainty_matrix(theta)
+    #A = uncertainty_matrix(theta)
+    #A = make_braking_uncertainty_matrix(theta)
     # terminal time
     #V[-1] = np.min(costs[-1], axis=1)        # min over actions
     V[-1] = np.zeros(S)
@@ -141,9 +263,12 @@ def backward_optimiser_with_uncertainty(costs_arr,theta):
         # q[t, s, a] = C[t, s, a] + gamma * V[t+1, s]
         # We need to broadcast V[t+1] to match actions axis
         #cont = gamma * V[t + 1][:, None]     # shape (S, 1) # if we can not change state
+        #S×S array where each row is equal to V[t + 1].
         cont = gamma * V[t + 1][next_state]
         base = costs[t] + cont # shape (S, A)
-        q = base@A
+        #q = base@A
+        q = make_braking_uncertainty_matrix(theta,base)
+        # finds the min element along each row. 
         policy[t] = np.argmin(q, axis=1)
         V[t] = np.min(q, axis=1)
     return policy,V
@@ -246,12 +371,14 @@ def add_Forces_data_to_optimal_trajectory(traj_df, acc, av, M, g, tau_h, tau_v, 
     def F_acc(t,l0,s0,l1,s1):
         a = get_acc(t,l0,s0,l1,s1)
         speed = index_to_speed(s0)
-        F = M*(a if a > 0 else -F_X_NEG_SCALE*a) + tau_h*speed*speed
+        a_scaled = (a if a > 0 else -F_X_NEG_SCALE*a)
+        F = M*a_scaled + tau_h*speed*speed
         return F
     
     def F_x(t,l0,s0,l1,s1):
         a = get_acc(t,l0,s0,l1,s1)
-        F = F_X_MAX_SCALE*M*abs(a)
+        a_scaled = (a if a > 0 else -F_X_NEG_SCALE*a)
+        F = F_X_MAX_SCALE*M*abs(a_scaled)
         return F
     
     def F_y(t,l0,s0,d0,l1,s1,d1):

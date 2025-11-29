@@ -5,11 +5,9 @@ from pathlib import Path
 
 import Utils.constants
 from Utils.constants import FOLDER
-from Utils.constants import N_LANES, N_SPEEDS, N_TIME_LIMIT, N_DIRECTIONS, N_SPEED_DEVIATION, N_LANE_DEVIATION, N_TIME_LIMIT
+from Utils.constants import N_LANES, N_SPEEDS, N_DIRECTIONS, N_SPEED_DEVIATION_RED, N_SPEED_DEVIATION_INC, N_LANE_DEVIATION, N_TIME_LIMIT
 from Utils.constants import MAX_COST_VALUE
 from Utils.constants import index_to_speed
-print(f"N_LANES: {N_LANES} N_SPEEDS:{N_SPEEDS} N_DIRECTIONS:{N_DIRECTIONS}")
-print(f"State space {N_LANES*N_SPEEDS*N_DIRECTIONS} N_SPEED_DEVIATION:{N_SPEED_DEVIATION} N_LANE_DEVIATION:{N_LANE_DEVIATION}")
 
 #lane transitions
 def l0_range():
@@ -36,12 +34,10 @@ def d1_range(l0):
     if l0 == 0: return [0,2]
     if l0 == N_LANES-1: return [0,1]
     return [0,1,2]
-
 def get_previous_lane(l0,d0):
     if d0 == 1: return l0 + 1
     if d0 == 2: return l0 - 1
     return l0 
-
 def get_next_lane(l0,d0):
     if d0 == 1: return l0 - 1
     if d0 == 2: return l0 + 1
@@ -50,7 +46,7 @@ def get_next_lane(l0,d0):
 def s0_range():
     return range(N_SPEEDS)
 def s1_range(index):
-    return range(max(0,index-N_SPEED_DEVIATION), min(N_SPEEDS,index+N_SPEED_DEVIATION+1))
+    return range(max(0,index-N_SPEED_DEVIATION_RED), min(N_SPEEDS,index+N_SPEED_DEVIATION_INC+1))
 
 #speed_ranges
 speeds_range = [(s0,s1) for s0 in s0_range() for s1 in s1_range(s0)]
