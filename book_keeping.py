@@ -1,5 +1,6 @@
 from pathlib import Path
 import polars as pl
+import os
 
 def make_folder_name(
     N_LANES,
@@ -10,13 +11,13 @@ def make_folder_name(
     tau_h,
     tau_v,
     mu,
-    F_MAX_ACC,
-    F_X_NEG_SCALE,
-    F_X_MAX_SCALE,
-    F_Y_MAX_SCALE,
-    rho
+    Power,
+    F_X_neg_scale,
+    F_X_scale,
+    F_Y_scale,
+    limit_trust,
+    control_trust
 ) -> str:
-    # you can tweak this format however you like
     return (
         "TESTRUN"
         f"_L{N_LANES}"
@@ -27,77 +28,58 @@ def make_folder_name(
         f"_th{tau_h}"
         f"_tv{tau_v}"
         f"_mu{mu}"
-        f"_Facc{F_MAX_ACC}"
-        f"_Fxns{F_X_NEG_SCALE}"
-        f"_Fxm{F_X_MAX_SCALE}"
-        f"_Fyms{F_Y_MAX_SCALE}"
-        f"_rho{rho}"
+        f"_P{Power}"
+        f"_Fxns{F_X_neg_scale}"
+        f"_Fxs{F_X_scale}"
+        f"_Fys{F_Y_scale}"
+        f"limit_trust{limit_trust}"
+        f"control_trust{control_trust}"
 
     )
 
 
-def init_test_run_folder(
-    base_dir,
-    N_LANES,
-    N_SPEEDS,
-    N_DIRECTIONS,
-    MASS,
-    g,
-    tau_h,
-    tau_v,
-    mu,
-    F_MAX_ACC,
-    F_X_NEG_SCALE,
-    F_X_MAX_SCALE,
-    F_Y_MAX_SCALE,
-    rho
-):
-    # 1) build folder name
+def init_test_run_folder(config, base_directory):
     folder_name = make_folder_name(
-        N_LANES,
-        N_SPEEDS,
-        N_DIRECTIONS,
-        MASS,
-        g,
-        tau_h,
-        tau_v,
-        mu,
-        F_MAX_ACC,
-        F_X_NEG_SCALE,
-        F_X_MAX_SCALE,
-        F_Y_MAX_SCALE,
-        rho
+        config.gc.N_LANES,
+        config.gc.N_SPEEDS,
+        config.gc.N_DIRECTIONS,
+        config.pc.M,
+        config.pc.g,
+        config.pc.tau_h,
+        config.pc.tau_v,
+        config.pc.mu,
+        config.pc.Power,
+        config.pc.F_X_neg_scale,
+        config.pc.F_X_scale,
+        config.pc.F_Y_scale,
+        config.pc.limit_trust,
+        config.pc.control_trust
     )
-
-    # 2) create folder
-    run_path = Path(base_dir) / folder_name
+    run_path = Path(base_directory) / folder_name
+    has_run = os.path.isdir(run_path)
+    if has_run:
+        return run_path, False
     run_path.mkdir(parents=True, exist_ok=True)
-
-    # 3) create Setting frame (one row with all arguments)
     Setting = pl.DataFrame(
         {
-            "N_LANES": [N_LANES],
-            "N_SPEEDS": [N_SPEEDS],
-            "N_DIRECTIONS": [N_DIRECTIONS],
-            "MASS": [MASS],
-            "g": [g],
-            "tau_h": [tau_h],
-            "tau_v": [tau_v],
-            "mu": [mu],
-            "F_MAX_ACC": [F_MAX_ACC],
-            "F_X_NEG_SCALE": [F_X_NEG_SCALE],
-            "F_X_MAX_SCALE": [F_X_MAX_SCALE],
-            "F_Y_MAX_SCALE": [F_Y_MAX_SCALE],
-            "rho": [rho]
+            "N_LANES": [config.gc.N_LANES],
+            "N_SPEEDS": [config.gc.N_SPEEDS],
+            "N_DIRECTIONS": [config.gc.N_DIRECTIONS],
+            "MASS": [config.pc.M],
+            "g": [config.pc.g],
+            "tau_h": [config.pc.tau_h],
+            "tau_v": [config.pc.tau_v],
+            "mu": [config.pc.mu],
+            "Power": [config.pc.Power],
+            "F_X_neg_scale": [config.pc.F_X_neg_scale],
+            "F_X_scale": [config.pc.F_X_scale],
+            "F_Y_scale": [config.pc.F_Y_scale],
+            "limit_trust": [config.pc.limit_trust],
+            "control_trust": [config.pc.control_trust]
         }
     )
-
-    # 4) save settings into the folder
     Setting.write_parquet(run_path / "Setting.parquet")
-    # or CSV:
-    # Setting.write_csv(run_path / "Setting.csv")
-
-    return run_path, Setting
+    return run_path, True
 
 
 def save_frame_to_run_dir(

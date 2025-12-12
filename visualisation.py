@@ -3,32 +3,14 @@ import numpy as np
 import os
 from pathlib import Path
 
-
-import Utils.constants
-from Utils.constants import FOLDER, DATA_FOLDER
-from Utils.constants import N_LANES, N_SPEEDS, N_TIME_LIMIT, N_DIRECTIONS, N_SPEED_DEVIATION, N_LANE_DEVIATION, N_TIME_LIMIT
-from Utils.constants import MAX_COST_VALUE
-
 import plotly.graph_objects as go
-# def make_track_plot_no_car(track_df):
-#     fig = go.Figure()
-#     fig.add_trace(go.Scatter(
-#             x = track_df["x_m"].to_numpy(),
-#             y = track_df["y_m"].to_numpy(),
-#             mode = "markers",
-#             marker  = dict(size=1),
-#             name = "track"
-#         ))
-#     fig.update_layout(
-#         width=800,
-#         height=800,
-#         title="Track Lanes",
-#         xaxis=dict(scaleanchor="y", scaleratio=1),
-#     )
-#     fig.show()
-#     return fig
+import Utils.config as configs
 
-def make_track_plot(ot_df, save_path: str | None = None):
+
+def make_track_plot(config:configs.config,
+                    ot_df, save_path: str | None = None):
+    #lanes
+    gc = config.gc
     fig = go.Figure()
     def add_line(i):
         fig.add_trace(go.Scatter(
@@ -41,19 +23,11 @@ def make_track_plot(ot_df, save_path: str | None = None):
             )
         )
     add_line(0)
-    add_line(N_LANES-1)   
-    # for i in range(N_LANES):
-    #     fig.add_trace(go.Scatter(
-    #         x = ot_df["x_lane" + str(i)].to_numpy(),
-    #         y = ot_df["y_lane" + str(i)].to_numpy(),
-    #         mode = "markers",
-    #         marker  = dict(size=3, color="lightgray"),
-    #         #name = "lane " + str(i)
-    #     ))
-
+    add_line(gc.N_LANES-1) 
+    #car
     x_coord_car = ot_df["tr_x"]
     y_coord_car = ot_df["tr_y"]
-    speed = ot_df["s0"]*N_SPEED_DEVIATION
+    speed = ot_df["s0"]*gc.INDEX_SPEED_MULTIPLIER
     custom_speed_scale = [
         [0.00, "rgb(  0,  0,  40)"],  # very low speed
         [0.25, "rgb(  0,  80, 200)"],
@@ -61,7 +35,7 @@ def make_track_plot(ot_df, save_path: str | None = None):
         [0.75, "rgb(240, 220,  70)"],
         [1.00, "rgb(220,  30,  30)"],  # very high speed
     ]
-    vmin, vmax = 0, N_SPEED_DEVIATION * N_SPEEDS  # or speed.min(), speed.max()
+    vmin, vmax = 0, gc.INDEX_SPEED_MULTIPLIER * gc.N_SPEEDS  # or speed.min(), speed.max()
 
     fig.add_trace(go.Scatter(
         x=x_coord_car,
@@ -101,7 +75,11 @@ def make_track_plot(ot_df, save_path: str | None = None):
 
 
 
-def make_track_plot_2(ot_df, show_plot, save_path):
+def make_track_plot_2(  config:configs.config,
+                        ot_df, 
+                        show_plot, 
+                        save_path):
+    gc = config.gc
     fig = go.Figure()
     def add_line(i):
         fig.add_trace(go.Scatter(
@@ -113,12 +91,12 @@ def make_track_plot_2(ot_df, show_plot, save_path):
             showlegend=False
             )
         )   
-    for i in range(N_LANES):
+    for i in range(gc.N_LANES):
         add_line(i)
 
     x_coord_car = ot_df["tr_x"]
     y_coord_car = ot_df["tr_y"]
-    speed = ot_df["s0"]*N_SPEED_DEVIATION
+    speed = ot_df["s0"]*gc.INDEX_SPEED_MULTIPLIER
 
     custom_speed_scale = [
         [0.00, "rgb(  0,  0,  40)"],  # very low speed
@@ -127,7 +105,7 @@ def make_track_plot_2(ot_df, show_plot, save_path):
         [0.60, "rgb(240, 220,  70)"],
         [1.00, "rgb(220,  30,  30)"],  # very high speed
     ]
-    vmin, vmax = 0, N_SPEED_DEVIATION * N_SPEEDS  # or speed.min(), speed.max()
+    vmin, vmax = 0, gc.INDEX_SPEED_MULTIPLIER * gc.N_SPEEDS  # or speed.min(), speed.max()
 
     fig.add_trace(go.Scatter(
         x=x_coord_car,
@@ -168,40 +146,11 @@ def make_track_plot_2(ot_df, show_plot, save_path):
         fig.write_html(save_path)
     return fig
 
-#def make_just_track_plot(ot_df, save_path: str | None = None):
-def make_just_track_plot(ot_df, show_plot, save_path):
-    fig = go.Figure()
-    def add_line(i, c):
-        fig.add_trace(go.Scatter(
-            x = ot_df["x_lane" + str(i)].to_numpy(),
-            y = ot_df["y_lane" + str(i)].to_numpy(),
-            mode = "lines",
-            marker  = dict(size=1, color=c),
-            line = dict(color=c, width=1),
-            showlegend=False
-            )
-        ) 
-    for i in range(N_LANES):
-        add_line(i,"white")  
-    add_line(0,"black")
-    add_line(N_LANES-1,"black")
-
-    fig.update_layout(
-        width=800,
-        height=1000,
-        title="Silverstone Track",
-        xaxis=dict(scaleanchor="y", scaleratio=1)
-    )
-    fig.update_xaxes(visible=False)
-    fig.update_yaxes(visible=False)
-    if show_plot:
-        fig.show()
-    if save_path is not None:
-        #fig.write_html(save_path)
-        fig.write_image(save_path)
-    return fig
-
-def make_just_track_plot(ot_df, show_plot, save_path: str | None = None):
+def make_just_track_plot(config:configs.config,
+                        ot_df, 
+                        show_plot, 
+                        save_path: str | None = None):
+    gc = config.gc
     fig = go.Figure()
     def add_line(i, c):
         fig.add_trace(go.Scatter(
@@ -213,7 +162,7 @@ def make_just_track_plot(ot_df, show_plot, save_path: str | None = None):
             showlegend=False
             )
         ) 
-    for i in range(N_LANES):
+    for i in range(gc.N_LANES):
         add_line(i,"lightgray")
 
     fig.update_layout(
@@ -239,7 +188,7 @@ def pl_row_plots(
     y_data_dic,
     plot_title: str,
     show_plot,
-    save_path):
+    save_path=None):
     fig = go.Figure()
     for key in y_data_dic.keys():
         y_data = y_data_dic[key]
@@ -263,18 +212,85 @@ def pl_row_plots(
     return fig
 
 
-# combined = make_subplots(rows=1, cols=3, subplot_titles=["Fig 1", "Fig 2", "Fig 3"])
+#Plots a dictionary of lines
+def make_just_track_plot(   pair_list,
+                            show_plot, 
+                            save_path: str | None = None):
+    fig = go.Figure()
+    def add_line(i, c):
+        fig.add_trace(go.Scatter(
+            x = ot_df["x_lane" + str(i)].to_numpy(),
+            y = ot_df["y_lane" + str(i)].to_numpy(),
+            mode = "markers",
+            line = dict(color="white", width=1),
+            marker  = dict(size=1, color=c),
+            showlegend=False
+            )
+        ) 
+    for i in range(gc.N_LANES):
+        add_line(i,"lightgray")
 
-# for trace in fig1.data:
-#     combined.add_trace(trace, row=1, col=1)
+    fig.update_layout(
+        width=800,
+        height=1000,
+        title="Silverstone Track",
+        xaxis=dict(scaleanchor="y", scaleratio=1),
+        plot_bgcolor="white"
+    )
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    
+    if show_plot:
+        fig.show()
+    if save_path is not None:
+        #fig.write_html(save_path)
+        fig.write_html(save_path)
+    return fig
 
-# for trace in fig2.data:
-#     combined.add_trace(trace, row=1, col=2)
-
-# for trace in fig3.data:
-#     combined.add_trace(trace, row=1, col=3)
-
-# combined.update_layout(height=400, width=1200, title_text="All together")
-# combined.show()
 
 
+from dataclasses import dataclass
+import plotly.graph_objects as go
+
+@dataclass
+class Trajectory:
+    x_data: np
+    y_data: np
+    color : str = "black"
+    size : int = 1
+
+    
+#Plots a dictionary of lines
+def make_just_track_plot(   lines:list,
+                            show_plot, 
+                            save_path: str | None = None):
+    fig = go.Figure()
+    def add_line(x_data, y_data, color, size):
+        fig.add_trace(go.Scatter(
+            x = x_data,
+            y = y_data,
+            mode = "markers",
+            line = dict(color="white", width=size),
+            marker  = dict(size=size, color=color),
+            showlegend=True
+            )
+        ) 
+    for line in lines:
+        add_line(line.x_data, line.y_data, line.color, line.size)
+
+    fig.update_layout(
+        width=800,
+        height=1000,
+        title="Silverstone Track",
+        xaxis=dict(scaleanchor="y", scaleratio=1),
+        plot_bgcolor="white"
+    )
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    
+    if show_plot:
+        fig.show()
+    if save_path is not None:
+        #fig.write_html(save_path)
+        fig.write_html(save_path)
+    return fig
